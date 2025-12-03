@@ -504,7 +504,14 @@ if df is not None:
                 "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "driver_for_successful_order",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
-            result_df = pd.DataFrame(out_rows)[cols + ["_error"]]
+            df = pd.DataFrame(out_rows)
+
+            # 确保有 _error 这一列（即使 Beans 没返回）
+            if "_error" not in df.columns:
+                df["_error"] = ""
+
+            # 用 reindex 允许缺少字段：不存在的列会自动补为空
+            result_df = df.reindex(columns=cols + ["_error"])
 
             st.success("已生成结果表。")
             st.dataframe(result_df.head(30), use_container_width=True)
