@@ -118,8 +118,12 @@ def _count_successful_dropoffs(logs):
     for lgx in logs:
         t = safe_get(lgx, "type")
         item_type = safe_get(lgx, "item", "type")
-        if t == "success" and item_type == "DROPOFF":
-            success_count += 1
+        # 更宽松的条件：只要 type 是 "success" 就计数
+        # 如果 item_type 存在，则要求是 DROPOFF；如果不存在，也计数（因为可能是成功事件）
+        if t == "success":
+            # 如果 item_type 存在，必须是 DROPOFF；如果不存在，也认为是成功投递
+            if item_type is None or item_type == "DROPOFF":
+                success_count += 1
     return success_count
 
 def _count_delivery_attempts(logs):
@@ -198,10 +202,41 @@ def _extract_driver_info(logs):
             if driver: # If driver found from 'driver' key, break from outer loop
                 break
 
-            # 2) 退而求其次，看 generatedBy
-            gen = safe_get(ev, "pod", "generatedBy") or safe_get(ev, "generatedBy") or safe_get(ev, "log", "generatedBy")
+            # 2) 退而求其次，看 generatedBy (尝试多种可能的字段名和位置)
+            # 尝试 camelCase 和 snake_case 两种命名方式
+            gen = (safe_get(ev, "pod", "generatedBy") or 
+                   safe_get(ev, "pod", "generated_by") or
+                   safe_get(ev, "generatedBy") or 
+                   safe_get(ev, "generated_by") or
+                   safe_get(ev, "log", "generatedBy") or
+                   safe_get(ev, "log", "generated_by"))
+            
+            # 如果还没找到，尝试在整个 log 对象中递归查找
+            if not gen:
+                def find_generated_by(obj, depth=0):
+                    if depth > 3:  # 限制递归深度
+                        return None
+                    if isinstance(obj, dict):
+                        # 直接检查当前层
+                        for key in ["generatedBy", "generated_by", "generateBy", "generate_by"]:
+                            if key in obj and obj[key]:
+                                return obj[key]
+                        # 递归检查所有值
+                        for val in obj.values():
+                            result = find_generated_by(val, depth + 1)
+                            if result:
+                                return result
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            result = find_generated_by(item, depth + 1)
+                            if result:
+                                return result
+                    return None
+                
+                gen = find_generated_by(ev)
+            
             if gen:
-                driver = gen
+                driver = str(gen)
                 break # Found a driver, break from outer loop (prioritize latest event)
     return driver
 
@@ -316,6 +351,20 @@ def parse_beans_status_logs(resp_json):
 
     driver = _extract_driver_info(logs)
 
+    # 专门从成功投递的日志中提取 generatedBy
+    generated_by_from_success = None
+    if logs:
+        success_logs = [lgx for lgx in logs if safe_get(lgx, "type") == "success"]
+        # 按时间排序，取最新的成功日志
+        if success_logs:
+            latest_success = sorted(success_logs, key=event_ts_millis, reverse=True)[0]
+            generated_by_from_success = (safe_get(latest_success, "pod", "generatedBy") or 
+                                        safe_get(latest_success, "pod", "generated_by") or
+                                        safe_get(latest_success, "generatedBy") or 
+                                        safe_get(latest_success, "generated_by") or
+                                        safe_get(latest_success, "log", "generatedBy") or
+                                        safe_get(latest_success, "log", "generated_by"))
+
     driver_for_successful_order = driver if successful_dropoff_count > 0 else None
 
     return {
@@ -342,6 +391,7 @@ def parse_beans_status_logs(resp_json):
         "successful_dropoffs": successful_dropoff_count, # 新增成功投递次数
         "status": last_type,                      # 新增：最后一次事件的 type（原样）
         "driver": driver,  # 👈 新增这一行
+        "generatedBy": generated_by_from_success,  # 从成功日志中提取的 generatedBy
         "driver_for_successful_order": driver_for_successful_order, # 新增成功订单司机名
         "client_name": shipper_name,
         "service_type": service_type,
@@ -479,8 +529,11 @@ if df is not None:
                             "Oversize Surcharge": None, "Signature required": None,
                             "Address Correction": None, "Total shipping fee": None,
                             "multi_attempt": None,
+                            "successful_dropoffs": None,
                             "status": None,
                             "driver": None,   # 👈 新增
+                            "generatedBy": None,  # 👈 新增
+                            "driver_for_successful_order": None,  # 👈 新增
                             "client_name": None, "service_type": None,
                             "pickup_address": None, "delivery_address": None,
                             "_error": resp["_error"],
@@ -501,17 +554,10 @@ if df is not None:
                 "weight_lbs", "length_in", "width_in", "height_in",
                 "dim_weight", "billable weight",
                 "length+girth", "Base Rate", "Oversize Surcharge", "Signature required", "Address Correction",
-                "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "driver_for_successful_order",
+                "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "generatedBy", "driver_for_successful_order",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
-            df = pd.DataFrame(out_rows)
-
-            # 确保有 _error 这一列（即使 Beans 没返回）
-            if "_error" not in df.columns:
-                df["_error"] = ""
-
-            # 用 reindex 允许缺少字段：不存在的列会自动补为空
-            result_df = df.reindex(columns=cols + ["_error"])
+            result_df = pd.DataFrame(out_rows)[cols + ["_error"]]
 
             st.success("已生成结果表。")
             st.dataframe(result_df.head(30), use_container_width=True)
