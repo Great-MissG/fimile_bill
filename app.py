@@ -522,7 +522,7 @@ if df is not None:
                         out_rows.append({
                             "Order ID": tid, "Customer ID": None, "Beans Tracking": tid,
                             "order_time": None, "facility_check_in_time": None, "delivery_time": None,
-                            "weight_lbs": None, "Dim": None,
+                            "weight_lbs": None,
                             "length_in": None, "width_in": None, "height_in": None,
                             "dim_weight": None, "billable weight": None,
                             "length+girth": None, "Base Rate": None,
@@ -531,11 +531,11 @@ if df is not None:
                             "multi_attempt": None,
                             "successful_dropoffs": None,
                             "status": None,
-                            "driver": None,   # 👈 新增
-                            "generatedBy": None,  # 👈 新增
-                            "driver_for_successful_order": None,  # 👈 新增
+                            "driver": None,
+                            "generatedBy": None,
+                            "driver_for_successful_order": None,
                             "client_name": None, "service_type": None,
-                            "pickup_address": None, "delivery_address": None,
+                            "pickup_address": None, "delivery_address": None, "delivery_phone": None,
                             "_error": resp["_error"],
                         })
                     else:
@@ -557,7 +557,10 @@ if df is not None:
                 "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "generatedBy", "driver_for_successful_order",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
-            result_df = pd.DataFrame(out_rows)[cols + ["_error"]]
+            result_df = pd.DataFrame(out_rows)
+            # 只选择存在的列，避免 KeyError
+            available_cols = [c for c in cols + ["_error"] if c in result_df.columns]
+            result_df = result_df[available_cols]
 
             st.success("已生成结果表。")
             st.dataframe(result_df.head(30), use_container_width=True)
