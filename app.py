@@ -513,8 +513,21 @@ if df is not None:
                 "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "driver_for_successful_order",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
-            result_df = pd.DataFrame(out_rows)[cols + ["_error"]]
+            # ✅ 新写法从这里开始
+            df = pd.DataFrame(out_rows)
 
+            # 如果完全没数据，给个友好提示
+            if df.empty:
+                st.warning("Beans.ai 没有返回任何结果，请检查 tracking_id 或输入文件。")
+                st.stop()
+
+            # ✅ 逐列补齐：如果某列不存在，就先建一列空的
+            for c in cols + ["_error"]:
+                if c not in df.columns:
+                    df[c] = ""
+
+            # ✅ 现在所有列都一定存在，可以放心按固定顺序取
+            result_df = df[cols + ["_error"]]
             st.success("已生成结果表。")
             st.dataframe(result_df.head(30), use_container_width=True)
 
