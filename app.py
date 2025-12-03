@@ -14,7 +14,8 @@ st.caption("上传包含 tracking_id 的 CSV/XLSX → 调 Beans.ai → 生成结
 # 固定配置（请在这里写死）
 # =========================
 API_URL = "https://isp.beans.ai/enterprise/v1/lists/status_logs"
-AUTH_BASIC = (st.secrets.get("BEANS_API_AUTH_BASIC"))
+# 从 secrets 获取，如果不存在则尝试从环境变量或使用默认值
+AUTH_BASIC = st.secrets.get("BEANS_API_AUTH_BASIC") or None
 
 # =========================
 # 工具函数
@@ -403,6 +404,13 @@ def parse_beans_status_logs(resp_json):
 
 def call_beans_api(tracking_id):
     try:
+        # 检查认证信息
+        if not AUTH_BASIC:
+            return {"_error": "认证信息未配置：请在 Streamlit secrets 中设置 BEANS_API_AUTH_BASIC"}
+        
+        if not isinstance(AUTH_BASIC, str) or not AUTH_BASIC.strip():
+            return {"_error": "认证信息无效：AUTH_BASIC 为空或格式不正确"}
+        
         headers = {"Authorization": AUTH_BASIC}
         r = requests.get(
             API_URL,
@@ -418,15 +426,21 @@ def call_beans_api(tracking_id):
         r.raise_for_status()
         return r.json()
     except requests.exceptions.HTTPError as http_err:
-        return {"_error": f"HTTP error occurred: {http_err}"}
+        # 特别处理 403 错误
+        if r.status_code == 403:
+            return {"_error": f"403 Forbidden - 认证失败：请检查 BEANS_API_AUTH_BASIC 是否正确。错误详情: {http_err}"}
+        elif r.status_code == 401:
+            return {"_error": f"401 Unauthorized - 认证信息无效：请检查 BEANS_API_AUTH_BASIC 是否正确。错误详情: {http_err}"}
+        else:
+            return {"_error": f"HTTP {r.status_code} 错误: {http_err}"}
     except requests.exceptions.ConnectionError as conn_err:
-        return {"_error": f"Error connecting to Beans.ai API: {conn_err}"}
+        return {"_error": f"连接错误：无法连接到 Beans.ai API: {conn_err}"}
     except requests.exceptions.Timeout as timeout_err:
-        return {"_error": f"Timeout error from Beans.ai API: {timeout_err}"}
+        return {"_error": f"请求超时：Beans.ai API 响应超时: {timeout_err}"}
     except requests.exceptions.RequestException as req_err:
-        return {"_error": f"An unexpected error occurred during the API request: {req_err}"}
+        return {"_error": f"请求异常: {req_err}"}
     except Exception as e:
-        return {"_error": f"An unexpected error occurred: {e}"}
+        return {"_error": f"未知错误: {e}"}
 
 # =========================
 # 页面：输入 Tracking（上传 或 粘贴）、选择列、运行、导出
@@ -495,9 +509,27 @@ if df is not None:
         index=(df.columns.get_loc(candidates[0]) if candidates else 0),
     )
 
-    if AUTH_BASIC.strip() == "Basic YOUR_KEY_HERE":
+    # 检查认证配置
+    if not AUTH_BASIC:
+        st.error("❌ **认证信息未配置**：请在 Streamlit Cloud 的 secrets 中设置 `BEANS_API_AUTH_BASIC`")
+        st.info("""
+        **配置方法：**
+        1. 在 Streamlit Cloud 中，点击 "Manage app" → "Secrets"
+        2. 添加以下配置：
+        ```
+        BEANS_API_AUTH_BASIC = "Basic YOUR_BASE64_TOKEN_HERE"
+        ```
+        3. 确保包含 "Basic " 前缀，例如：`Basic dXNlcjpzZWNyZXRfcGFzc3dvcmQ=`
+        """)
+        st.stop()
+    elif not isinstance(AUTH_BASIC, str) or not AUTH_BASIC.strip():
+        st.error("❌ **认证信息无效**：AUTH_BASIC 为空或格式不正确")
+        st.stop()
+    elif AUTH_BASIC.strip() == "Basic YOUR_KEY_HERE":
         st.error("请先在 app.py 顶部把 AUTH_BASIC 替换为你的真实 Key（含“Basic ”）后再运行。")
-        st.stop() # Stop execution if AUTH_BASIC is not set
+        st.stop()
+    elif not AUTH_BASIC.strip().startswith("Basic "):
+        st.warning("⚠️ **警告**：AUTH_BASIC 应该以 'Basic ' 开头（包含空格）。当前值可能不正确。")
 
     st.info("点击下方按钮开始调用 API（URL 与 Authorization 已写死在代码顶部）。")
     run = st.button("▶️ 调用 API 并生成结果表")
