@@ -415,16 +415,36 @@ if df is not None:
                             st.write(f"{done}/{len(tids)} 完成")
 
             # 输出列顺序（Total shipping fee → multi_attempt → status）
+                        # 输出列顺序（Total shipping fee → multi_attempt → status）
             cols = [
                 "Order ID", "Customer ID", "Beans Tracking",
                 "order_time", "facility_check_in_time", "delivery_time",
-                "weight_lbs", "Dim", "length_in", "width_in", "height_in",
+                "weight_lbs", "length_in", "width_in", "height_in",
                 "dim_weight", "billable weight",
                 "length+girth", "Base Rate", "Oversize Surcharge", "Signature required", "Address Correction",
-                "Total shipping fee", "multi_attempt", "status",
+                "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "driver_for_successful_order",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
-            result_df = pd.DataFrame(out_rows)[cols + ["_error"]]
+
+            # 把 out_rows 变成 DataFrame
+            df = pd.DataFrame(out_rows)
+
+            # 如果完全没有任何行，直接提示用户
+            if df.empty:
+                st.warning("Beans.ai 没有返回任何结果，请检查输入文件或 tracking_id。")
+                st.stop()
+
+            # 确保 _error 列存在
+            if "_error" not in df.columns:
+                df["_error"] = None
+
+            # 对于你想要的每一列，如果不存在，就补一列空值，避免 KeyError
+            for c in cols:
+                if c not in df.columns:
+                    df[c] = None
+
+            # 按既定顺序输出，保证不会再 KeyError
+            result_df = df[cols + ["_error"]]
 
             st.success("已生成结果表。")
             st.dataframe(result_df.head(30), use_container_width=True)
