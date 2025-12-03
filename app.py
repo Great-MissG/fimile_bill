@@ -15,7 +15,7 @@ st.caption("上传包含 tracking_id 的 CSV/XLSX → 调 Beans.ai → 生成结
 # =========================
 API_URL = "https://isp.beans.ai/enterprise/v1/lists/status_logs"
 # 从 secrets 获取，如果不存在则尝试从环境变量或使用默认值
-AUTH_BASIC = st.secrets.get("BEANS_API_AUTH_BASIC") or None
+AUTH_BASIC = st.secrets.get("AUTH_BASIC") or None
 
 # =========================
 # 工具函数
