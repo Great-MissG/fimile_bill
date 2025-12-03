@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import os
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -15,15 +14,7 @@ st.caption("上传包含 tracking_id 的 CSV/XLSX → 调 Beans.ai → 生成结
 # 固定配置（请在这里写死）
 # =========================
 API_URL = "https://isp.beans.ai/enterprise/v1/lists/status_logs"
-# 从环境变量中读取 AUTH_BASIC，建议在部署环境设置 BEANS_API_AUTH_BASIC 环境变量
-AUTH_BASIC = os.environ.get("BEANS_API_AUTH_BASIC")
-
-# 如果 AUTH_BASIC 没有设置，给出一个提示
-if not AUTH_BASIC:
-    st.error("错误：Beans.ai API 认证密钥未设置。")
-    st.markdown("请在运行应用前设置 `BEANS_API_AUTH_BASIC` 环境变量，其值应包含 `Basic ` 前缀和您的实际 Beans.ai API Key。")
-    st.markdown("""例如：在命令行运行 `export BEANS_API_AUTH_BASIC='Basic [您的实际密钥]'` (Linux/macOS) 或 `set BEANS_API_AUTH_BASIC='Basic [您的实际密钥]'` (Windows)，然后启动应用。""")
-    st.stop() # 停止 Streamlit 应用的执行
+AUTH_BASIC = (st.secrets.get("BEANS_API_AUTH_BASIC"))
 
 # =========================
 # 工具函数
@@ -513,21 +504,8 @@ if df is not None:
                 "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "driver_for_successful_order",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
-            # ✅ 新写法从这里开始
-            df = pd.DataFrame(out_rows)
+            result_df = pd.DataFrame(out_rows)[cols + ["_error"]]
 
-            # 如果完全没数据，给个友好提示
-            if df.empty:
-                st.warning("Beans.ai 没有返回任何结果，请检查 tracking_id 或输入文件。")
-                st.stop()
-
-            # ✅ 逐列补齐：如果某列不存在，就先建一列空的
-            for c in cols + ["_error"]:
-                if c not in df.columns:
-                    df[c] = ""
-
-            # ✅ 现在所有列都一定存在，可以放心按固定顺序取
-            result_df = df[cols + ["_error"]]
             st.success("已生成结果表。")
             st.dataframe(result_df.head(30), use_container_width=True)
 
