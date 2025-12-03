@@ -22,7 +22,7 @@ AUTH_BASIC = os.environ.get("BEANS_API_AUTH_BASIC")
 if not AUTH_BASIC:
     st.error("错误：Beans.ai API 认证密钥未设置。")
     st.markdown("请在运行应用前设置 `BEANS_API_AUTH_BASIC` 环境变量。")
-    st.markdown("例如：在命令行运行 `export BEANS_API_AUTH_BASIC="Basic YOUR_KEY_HERE"` (Linux/macOS) 或 `set BEANS_API_AUTH_BASIC="Basic YOUR_KEY_HERE"` (Windows)，然后启动应用。")
+    st.markdown("""例如：在命令行运行 `export BEANS_API_AUTH_BASIC='Basic YOUR_KEY_HERE'` (Linux/macOS) 或 `set BEANS_API_AUTH_BASIC='Basic YOUR_KEY_HERE'` (Windows)，然后启动应用。""")
     st.stop() # 停止 Streamlit 应用的执行
 
 # =========================
