@@ -422,8 +422,9 @@ if df is not None:
                 "weight_lbs", "length_in", "width_in", "height_in",
                 "dim_weight", "billable weight",
                 "length+girth", "Base Rate", "Oversize Surcharge", "Signature required", "Address Correction",
-                "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver", "driver_for_successful_order",
+                "Total shipping fee", "multi_attempt", "status",
                 "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
+
             ]
 
             # 把 out_rows 变成 DataFrame
