@@ -374,7 +374,12 @@ if df is not None:
         if AUTH_BASIC.strip() == "Basic YOUR_KEY_HERE":
             st.error("请先在 app.py 顶部把 AUTH_BASIC 替换为你的真实 Key（含“Basic ”）后再运行。")
         else:
-            tids = df[tracking_col].dropna().astype(str).tolist()
+            # 保留原始输入 DataFrame，之后用以与 API 结果合并，避免导出时丢失原始行
+            original_df = df.copy()
+            # 规范化 tracking 便于合并匹配（去空格并大写）
+            original_df["_tracking_norm"] = original_df[tracking_col].fillna("").astype(str).str.strip().str.upper()
+
+            tids = original_df[tracking_col].dropna().astype(str).tolist()
             tids = [t for t in tids if t.strip()]
 
             out_rows = []
@@ -447,13 +452,32 @@ if df is not None:
             # 按既定顺序输出，保证不会再 KeyError
             result_df = df[cols + ["_error"]]
 
-            st.success("已生成结果表。")
-            st.dataframe(result_df.head(30), use_container_width=True)
+            # 将 API 返回的结果与原始输入按规范化 Tracking 合并，使用 left join 保留原始行
+            try:
+                # 先在 result_df 上生成规范化列
+                result_df["_tracking_norm"] = result_df["Beans Tracking"].fillna("").astype(str).str.strip().str.upper()
+                merged = original_df.merge(result_df, on="_tracking_norm", how="left", suffixes=("", "_api"))
+
+                # 构造最终列顺序：原始输入列在前，API 返回的额外列在后（剔除合并用的辅助列）
+                orig_cols = list(original_df.columns)
+                # 移除辅助列名保留原始展示
+                if "_tracking_norm" in orig_cols:
+                    orig_cols.remove("_tracking_norm")
+
+                api_cols = [c for c in merged.columns if c not in orig_cols and c != "_tracking_norm"]
+                final_cols = orig_cols + api_cols
+                merged = merged[final_cols]
+            except Exception:
+                # 退回到仅导出 API 结果（兼容性回退）
+                merged = result_df
+
+            st.success("已生成结果表（已合并回原始输入，以保留所有行）。")
+            st.dataframe(merged.head(30), use_container_width=True)
 
             # 导出
             buffer = BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                result_df.to_excel(writer, index=False, sheet_name="Result")
+                merged.to_excel(writer, index=False, sheet_name="Result")
             buffer.seek(0)
             st.download_button(
                 "⬇️ 下载结果 Excel",
