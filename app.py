@@ -26,6 +26,8 @@ if DEBUG_MODE:
 st.set_page_config(page_title="Tracking（表头一定要包含Tracking → Beans API → Export", layout="wide")
 st.title("📦 Tracking → Beans.ai API → Export")
 st.caption("上传包含 tracking_id 的 CSV/XLSX → 调 Beans.ai → 生成结果（含维度拆分、计费重量、费用、尝试次数、状态）。")
+# Debugging disabled in production
+debug_active = False
 
 # =========================
 # 固定配置（请在这里写死）
@@ -118,15 +120,11 @@ display_rate_df = None
 display_rate_path = None
 
 # UI: select rate card and show a preview (selection stored in session_state)
-if "selected_rate_key" not in st.session_state:
-    # default to WYD if available
-    st.session_state["selected_rate_key"] = "wyd" if "wyd" in RATE_CARDS else list(RATE_CARDS.keys())[0]
-
 selected = st.selectbox(
     "选择价卡",
     options=list(RATE_CARDS.keys()),
     format_func=lambda k: RATE_CARDS[k]["display"],
-    index=list(RATE_CARDS.keys()).index(st.session_state["selected_rate_key"]),
+    index=list(RATE_CARDS.keys()).index("wyd" if "wyd" in RATE_CARDS else list(RATE_CARDS.keys())[0]),
     key="selected_rate_key",
 )
 
@@ -385,12 +383,15 @@ def _extract_addresses_and_phone(logs, first_item, suc_log):
                 delivery_address = addr
                 break
 
+    # delivery_phone extraction intentionally disabled to avoid exposing phone numbers
+    # The original logic (kept here as comment) would iterate logs and take customerPhone from DROPOFF item:
+    # delivery_phone = None
+    # for lgx in logs:
+    #     item = safe_get(lgx, "item") or {}
+    #     if (safe_get(item, "type") or "").upper() == "DROPOFF":
+    #         delivery_phone = safe_get(item, "customerPhone")
+    #         break
     delivery_phone = None
-    for lgx in logs:
-        item = safe_get(lgx, "item") or {}
-        if (safe_get(item, "type") or "").upper() == "DROPOFF":
-            delivery_phone = safe_get(item, "customerPhone")
-            break
     return pickup_address, delivery_address, delivery_phone
 
 def _extract_driver_info(logs):
@@ -415,6 +416,156 @@ def _extract_driver_info(logs):
                 driver = gen
                 break # Found a driver, break from outer loop (prioritize latest event)
     return driver
+
+
+def _event_time_ms(ev) -> int | None:
+    """Return event time in milliseconds if detectable, else None.
+
+    Checks common keys: tsMillis, timestamp, updatedAt, createdAt (case-insensitive).
+    Numeric values are interpreted as ms if large (>1e12) or as seconds if ~1e9..1e12.
+    ISO-like strings are parsed with fromisoformat (Z -> +00:00).
+    """
+    if not isinstance(ev, dict):
+        return None
+    # normalize keys to lower->original
+    for k, v in ev.items():
+        if not isinstance(k, str):
+            continue
+    keys = ["tsMillis", "timestamp", "updatedAt", "createdAt"]
+    for key in keys:
+        # case-insensitive lookup
+        val = None
+        for k in ev.keys():
+            if isinstance(k, str) and k.lower() == key.lower():
+                val = ev.get(k)
+                break
+        if val is None:
+            continue
+        # numeric
+        try:
+            if isinstance(val, (int, float)):
+                v = float(val)
+                # heuristic
+                if v > 1e12:
+                    return int(v)
+                if v > 1e9:
+                    return int(v * 1000) if v < 1e11 else int(v)
+                # assume seconds
+                return int(v * 1000)
+        except Exception:
+            pass
+        # string -> try ISO parse
+        try:
+            if isinstance(val, str) and val:
+                s = val.strip()
+                # handle trailing Z
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                dt = None
+                try:
+                    dt = datetime.fromisoformat(s)
+                except Exception:
+                    # try to parse numeric string
+                    try:
+                        nv = float(s)
+                        if nv > 1e12:
+                            return int(nv)
+                        if nv > 1e9:
+                            return int(nv * 1000) if nv < 1e11 else int(nv)
+                        return int(nv * 1000)
+                    except Exception:
+                        dt = None
+                if dt is not None:
+                    # convert to epoch ms
+                    try:
+                        ts = dt.timestamp() * 1000.0
+                        return int(ts)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return None
+
+
+def extract_route_info(events: list[dict]) -> tuple[str, int | None, str | None, int]:
+    """Return (route_name, selected_tsMillis, selected_description, success_count).
+
+    Behavior follows spec: filter success events, select latest by ts/timestamp/updatedAt/createdAt,
+    fallback to last success when no timestamps. Parse description tail after last 'route'.
+    Returns empty strings / None when unavailable.
+    """
+    if not events or not isinstance(events, list):
+        return "", None, None, 0
+    # collect success events with their original index to allow fallback to last occurrence
+    success_items = []
+    for idx, ev in enumerate(events):
+        try:
+            t = None
+            for k in ev.keys():
+                if isinstance(k, str) and k.lower() == "type":
+                    t = ev.get(k)
+                    break
+            if t is None:
+                t = ev.get("type")
+            if isinstance(t, str) and t.strip().lower() == "success":
+                success_items.append((idx, ev))
+        except Exception:
+            continue
+    success_count = len(success_items)
+    if success_count == 0:
+        return "", None, None, 0
+
+    # compute timestamps and pick best
+    best_ev = None
+    best_ts = None
+    for idx, ev in success_items:
+        ts = _event_time_ms(ev)
+        if ts is not None:
+            if best_ts is None or ts > best_ts:
+                best_ts = ts
+                best_ev = (idx, ev)
+
+    if best_ev is None:
+        # no timestamp available: choose last success in original order
+        best_ev = success_items[-1]
+        best_ts = _event_time_ms(best_ev[1])
+
+    sel_ev = best_ev[1]
+
+    # extract description
+    desc = None
+    for k in sel_ev.keys():
+        if isinstance(k, str) and k.lower() == "description":
+            desc = sel_ev.get(k)
+            break
+    if desc is None:
+        desc = sel_ev.get("description") or sel_ev.get("desc")
+    desc_str = desc if isinstance(desc, str) else None
+    if not desc_str:
+        return "", best_ts, desc_str, success_count
+
+    s = desc_str.strip()
+    # find all occurrences of 'route' (case-insensitive)
+    matches = [m.start() for m in re.finditer(r"(?i)route", s)]
+    if not matches:
+        return "", best_ts, desc_str, success_count
+
+    candidates = []
+    for pos in matches:
+        tail = s[pos + len("route"):]
+        tail = tail.strip()
+        if tail:
+            candidates.append(tail)
+    if not candidates:
+        return "", best_ts, desc_str, success_count
+    chosen = max(candidates, key=lambda x: len(x))
+    chosen = re.sub(r"\s+", " ", chosen).strip()
+    return chosen, best_ts, desc_str, success_count
+
+
+def extract_route_name(events: list[dict]) -> str:
+    """Compatibility wrapper required by spec: return only route_name string."""
+    return extract_route_info(events)[0]
 
 def extract_dims(item):
     """从 item.dimensions.dims 智能提取 weight（WEIGHT）与 pd:（尺寸三边原串）"""
@@ -518,7 +669,7 @@ def _extract_first_item_details(logs):
 def parse_beans_status_logs(resp_json):
     """
     抽取目标字段（含你的全部需求）：
-    - 基本：Order ID / Customer ID(client_name=shipperName) / Beans Tracking / service_type
+    - 基本：Order ID / Customer ID(client_name=shipperName) / service_type
     - 时间：order_time / facility_check_in_time / delivery_time
     - 维度：Dim 原串、length_in/width_in/height_in、dim_weight、billable weight、length+girth
     - 费用：Base Rate / Oversize Surcharge / Signature required / Address Correction / Total shipping fee
@@ -611,13 +762,76 @@ def parse_beans_status_logs(resp_json):
     pickup_address, delivery_address, delivery_phone = _extract_addresses_and_phone(logs, first_item, suc_log)
 
     driver = _extract_driver_info(logs)
+    # Determine if this record/stop is a DROPOFF (compatible with multiple possible paths)
+    is_dropoff = False
+    try:
+        t1 = safe_get(first_item, "type")
+        if isinstance(t1, str) and t1.strip().upper() == "DROPOFF":
+            is_dropoff = True
+        else:
+            for lgx in logs:
+                itype = safe_get(lgx, "item", "type") or safe_get(lgx, "stop", "type")
+                if isinstance(itype, str) and itype.strip().upper() == "DROPOFF":
+                    is_dropoff = True
+                    break
+        if not is_dropoff:
+            for key in ("item", "record", "stop"):
+                v = resp_json.get(key) if isinstance(resp_json, dict) else None
+                if isinstance(v, dict):
+                    typ = None
+                    for kk in v.keys():
+                        if isinstance(kk, str) and kk.lower() == "type":
+                            typ = v.get(kk)
+                            break
+                    if not typ:
+                        typ = v.get("type")
+                    if isinstance(typ, str) and typ.strip().upper() == "DROPOFF":
+                        is_dropoff = True
+                        break
+    except Exception:
+        is_dropoff = False
+
+    # locate events list for route extraction (be tolerant of different keys)
+    events_candidates = None
+    if isinstance(resp_json, dict):
+        for k in ("listItemReadableStatusLogs", "events", "logs", "history", "statusLogs", "status_logs", "listItemStatusLogs"):
+            v = resp_json.get(k)
+            if isinstance(v, list):
+                events_candidates = v
+                break
+    if events_candidates is None:
+        events_candidates = logs
+
+    route_name = ""
+    route_ts = None
+    route_desc = None
+    route_success_count = 0
+    if is_dropoff:
+        try:
+            route_name, route_ts, route_desc, route_success_count = extract_route_info(events_candidates)
+        except Exception:
+            route_name, route_ts, route_desc, route_success_count = "", None, None, 0
+
+    # DEBUG: only emit minimal allowed debug fields (do not print token/response)
+    if debug_active:
+        try:
+            st.write({"tracking_id": tracking_id, "route_name": route_name, "route_tsMillis": route_ts})
+        except Exception:
+            pass
 
     driver_for_successful_order = driver if successful_dropoff_count > 0 else None
+    # include route parsing debug info for upstream sampling
+    route_debug = {
+        "is_dropoff": is_dropoff,
+        "success_count": route_success_count,
+        "selected_tsMillis": route_ts,
+        "selected_description": route_desc,
+        "parsed_route_name": route_name,
+    }
 
     return {
         "Order ID": tracking_id,
         "Customer ID": shipper_name,
-        "Beans Tracking": tracking_id,
         "order_time": order_time_iso,
         "facility_check_in_time": facility_check_in_iso,
         "delivery_time": delivery_time_iso,
@@ -638,6 +852,7 @@ def parse_beans_status_logs(resp_json):
         "successful_dropoffs": successful_dropoff_count, # 新增成功投递次数
         "status": last_type,                      # 新增：最后一次事件的 type（原样）
         "driver_for_successful_order": driver_for_successful_order, # 新增成功订单司机名
+        "route_name": route_name,
         
         "service_type": service_type,
         "pickup_address": pickup_address,
@@ -646,7 +861,7 @@ def parse_beans_status_logs(resp_json):
         "signature_required": sig_required,
         "room_of_choice": room_of_choice_val,
         "white_glove_service": white_glove_service_val,
-        "signature_required_debug": {"detected": sig_flag, "raw_dims_v": sig_detect_raw.get('dimensions.dims.V', []), "room_detected": room_flag, "white_glove_detected": white_flag},
+        # signature_required_debug removed per request
 
     }
 
@@ -782,7 +997,25 @@ def finalize_columns(df_in):
 
     # Reindex DataFrame to final_cols
     try:
+        # debug before/after reindex when interactive debug enabled
+        dbg = False
+        try:
+            dbg = bool(DEBUG_MODE) or bool(st.session_state.get("debug_ui", False))
+        except Exception:
+            dbg = bool(DEBUG_MODE)
+        if dbg:
+            try:
+                st.write("finalize_columns: before reindex columns:", list(df.columns))
+            except Exception:
+                pass
         final = df.reindex(columns=final_cols)
+        if dbg:
+            try:
+                st.write("finalize_columns: after reindex columns:", list(final.columns))
+                if "route_name" not in final.columns:
+                    st.error("route_name missing after finalize_columns reindex")
+            except Exception:
+                pass
     except Exception:
         final = df
 
@@ -946,6 +1179,92 @@ def compute_base_rate(merged_df: pd.DataFrame, wyd_rate_df: pd.DataFrame) -> pd.
         )
 
     return result
+
+
+def apply_final_column_order(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame with the exact final columns order (30 cols).
+
+    - Adds missing columns filled with empty string "".
+    - Preserves existing data when column names match.
+    - Keeps only the 30 columns specified (drops others for display/export).
+    """
+    required = [
+        "Tracking ID",
+        "Customer ID",
+        "order_time",
+        "facility_check_in_time",
+        "delivery_time",
+        "weight_lbs",
+        "length_in",
+        "width_in",
+        "height_in",
+        "dim_weight",
+        "billable weight",
+        "Base Rate",
+        "Oversize Surcharge",
+        "signature_required",
+        "room_of_choice",
+        "white_glove_service",
+        "Total shipping fee",
+        "multi_attempt",
+        "successful_dropoffs",
+        "status",
+        "route_name",
+        "driver_for_successful_order",
+        "service_type",
+        "pickup_address",
+        "pickup_address_zipcode",
+        "delivery_address",
+        "delivery_address_zipcode",
+        "delivery_phone",
+        "zone",
+        "_error",
+    ]
+
+    out = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    # map existing pickup/delivery zipcode names if present
+    try:
+        if "pickup_zipcode" in out.columns and "pickup_address_zipcode" not in out.columns:
+            out["pickup_address_zipcode"] = out["pickup_zipcode"]
+        if "delivery_zipcode" in out.columns and "delivery_address_zipcode" not in out.columns:
+            out["delivery_address_zipcode"] = out["delivery_zipcode"]
+    except Exception:
+        pass
+
+    # Preserve values computed under canonical/internal names by copying them
+    # into the exact required output column names (avoid losing computed rates)
+    try:
+        canonical_to_required = {
+            "base_rate": "Base Rate",
+            "oversize_surcharge": "Oversize Surcharge",
+            "total_shipping_fee": "Total shipping fee",
+            # already handled elsewhere but be defensive
+            "pickup_zipcode": "pickup_address_zipcode",
+            "delivery_zipcode": "delivery_address_zipcode",
+        }
+        for src, dst in canonical_to_required.items():
+            if src in out.columns and dst not in out.columns:
+                try:
+                    out[dst] = out[src]
+                except Exception:
+                    out[dst] = out[src].astype(object)
+    except Exception:
+        pass
+
+    # Ensure all required columns exist; fill missing with empty string
+    for c in required:
+        if c not in out.columns:
+            out[c] = ""
+
+    # Select only required columns in specified order
+    try:
+        out = out[required]
+    except Exception:
+        # fallback: construct DataFrame with required columns
+        out = pd.DataFrame({c: out[c] if c in out.columns else "" for c in required})
+
+    return out
 
 
 def build_final_df(merged: pd.DataFrame, rate_df: pd.DataFrame, rate_key: str = None, rate_path: str = None) -> pd.DataFrame:
@@ -1136,7 +1455,7 @@ if df is not None:
 
                     if isinstance(resp, dict) and "_error" in resp:
                         out_rows.append({
-                            "Order ID": tid, "Customer ID": None, "Beans Tracking": tid,
+                            "Order ID": tid, "Customer ID": None,
                             "order_time": None, "facility_check_in_time": None, "delivery_time": None,
                             "weight_lbs": None, "Dim": None,
                             "length_in": None, "width_in": None, "height_in": None,
@@ -1147,8 +1466,9 @@ if df is not None:
                             "Address Correction": None, "Total shipping fee": None,
                             "multi_attempt": None,
                             "status": None,
-                            "client_name": None, "service_type": None,
+                            "service_type": None,
                             "pickup_address": None, "delivery_address": None,
+                            "route_name": None,
                             "_error": resp["_error"],
                         })
                     else:
@@ -1162,19 +1482,47 @@ if df is not None:
 
             # 输出列顺序（Total shipping fee → multi_attempt → status）
             cols = [
-                "Order ID", "Customer ID", "Beans Tracking",
+                "Order ID", "Customer ID",
                 "order_time", "facility_check_in_time", "delivery_time",
                 "weight_lbs", "length_in", "width_in", "height_in",
                 "dim_weight", "billable weight",
                 "length+girth", "Base Rate", "Oversize Surcharge", "Address Correction",
-                "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "driver_for_successful_order",
+                "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "route_name", "driver_for_successful_order",
                 # service columns derived from dimensions.dims.V
                 "signature_required", "room_of_choice", "white_glove_service",
-                "client_name", "service_type", "pickup_address", "delivery_address", "delivery_phone"
+                "service_type", "pickup_address", "delivery_address", "delivery_phone"
             ]
 
             # 把 out_rows 变成 DataFrame
             df = pd.DataFrame(out_rows)
+            # Preserve a raw tracking value for internal normalization (do not expose in result_df)
+            try:
+                found = False
+                for cand in ("tracking_id", "trackingId", "tracking", "Order ID", "order_id", "OrderId"):
+                    if cand in df.columns:
+                        df["_tracking_norm_raw"] = df[cand].fillna("").astype(str).str.strip().str.upper()
+                        found = True
+                        break
+                if not found:
+                    df["_tracking_norm_raw"] = pd.Series([""] * len(df))
+            except Exception:
+                df["_tracking_norm_raw"] = pd.Series([""] * len(df))
+            # Debug: stage 'out_rows_df'
+            if debug_active:
+                try:
+                    st.write("STAGE: out_rows_df", df.shape)
+                    st.write("columns:", list(df.columns))
+                    if "tracking_id" in df.columns:
+                        st.write("sample tracking_id:", df["tracking_id"].astype(str).head(5).tolist())
+                    if "route_name" in df.columns:
+                        try:
+                            cnt = int((df["route_name"].astype(str).str.strip() != "").sum())
+                        except Exception:
+                            cnt = 0
+                        st.write("route_name non-empty rows at out_rows_df:", cnt)
+                        st.write(df[[c for c in ("tracking_id","route_name") if c in df.columns]].head(10))
+                except Exception:
+                    pass
             # 前端严格移除名为 'driver' 的列（后端或原始数据可能包含该列）
             if "driver" in df.columns:
                 df = df.drop(columns=["driver"])
@@ -1194,11 +1542,23 @@ if df is not None:
                     df[c] = None
 
             # 按既定顺序输出，保证不会再 KeyError
+            if debug_active:
+                try:
+                    st.write("Before column filter (result_df):", list(df.columns))
+                except Exception:
+                    pass
             result_df = df[cols + ["_error"]]
+            if debug_active:
+                try:
+                    st.write("After column filter (result_df):", list(result_df.columns))
+                    if "route_name" not in result_df.columns:
+                        st.warning("route_name missing at stage: result_df (after df[cols+['_error']])")
+                except Exception:
+                    pass
             # Minimal debug: show signature detection raw fields and computed value for first 5 rows
             try:
-                if 'signature_required_debug' in result_df.columns:
-                    dbg_cols = [c for c in ('Beans Tracking', 'signature_required', 'room_of_choice', 'white_glove_service', 'signature_required_debug') if c in result_df.columns]
+                dbg_cols = [c for c in ('signature_required', 'room_of_choice', 'white_glove_service') if c in result_df.columns]
+                if dbg_cols:
                     st.write("DEBUG service detection (first 5):")
                     st.dataframe(result_df[dbg_cols].head(5), use_container_width=True)
             except Exception:
@@ -1206,8 +1566,20 @@ if df is not None:
 
             # 将 API 返回的结果与原始输入按规范化 Tracking 合并，使用 left join 保留原始行
             try:
-                result_df["_tracking_norm"] = result_df["Beans Tracking"].fillna("").astype(str).str.strip().str.upper()
+                # Use the preserved raw tracking normalization from the original df to merge,
+                # so we can avoid exposing the original tracking column in result_df/ui/export.
+                result_df["_tracking_norm"] = df["_tracking_norm_raw"].fillna("").astype(str)
                 merged = original_df.merge(result_df, on="_tracking_norm", how="left", suffixes=("", "_api"))
+
+                if debug_active:
+                    try:
+                        st.write("STAGE: merged (after left join)")
+                        st.write("merged.shape:", merged.shape)
+                        st.write("merged.columns:", list(merged.columns))
+                        if "route_name" in merged.columns:
+                            st.write("route_name non-empty count in merged:", int((merged["route_name"].astype(str).str.strip() != "").sum()))
+                    except Exception:
+                        pass
 
                 # 构造最终列顺序：原始输入列在前，API 返回的额外列在后（剔除合并用的辅助列）
                 orig_cols = list(original_df.columns)
@@ -1236,7 +1608,17 @@ if df is not None:
                     else:
                         for idx, _c in enumerate(("signature_required", "room_of_choice", "white_glove_service")):
                             cols_list.insert(insert_at + idx, _c)
+                    if debug_active:
+                        try:
+                            st.write("Before reordering service cols:", list(merged.columns))
+                        except Exception:
+                            pass
                     merged = merged[cols_list]
+                    if debug_active:
+                        try:
+                            st.write("After reordering service cols:", list(merged.columns))
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 # Ensure service columns follow `signature_required` immediately
@@ -1256,14 +1638,49 @@ if df is not None:
                         merged = merged[cols_list]
                 except Exception:
                     pass
+                # Ensure `route_name` is positioned before any `driver` column, or after tracking id when driver missing
+                try:
+                    cols_list = list(merged.columns)
+                    if "route_name" in cols_list:
+                        if "driver" in cols_list:
+                            if debug_active:
+                                st.write("Before placing route_name before driver:", cols_list)
+                            cols_list.remove("route_name")
+                            insert_idx = cols_list.index("driver")
+                            cols_list.insert(insert_idx, "route_name")
+                            if debug_active:
+                                st.write("After placing route_name before driver:", cols_list)
+                        else:
+                            # find tracking-like column from original columns
+                            found_tracking = None
+                            for c in orig_cols:
+                                if isinstance(c, str) and ("track" in c.lower() or c.lower() in {"tracking id", "tracking_id"}):
+                                    found_tracking = c
+                                    break
+                            if debug_active:
+                                st.write("Found tracking-like column for route_name placement:", found_tracking)
+                            cols_list.remove("route_name")
+                            if found_tracking and found_tracking in cols_list:
+                                insert_idx = cols_list.index(found_tracking)
+                                cols_list.insert(insert_idx + 1, "route_name")
+                            else:
+                                cols_list.insert(1, "route_name")
+                    if debug_active:
+                        st.write("Reordering merged to cols_list length", len(cols_list))
+                    merged = merged[cols_list]
+                    if debug_active:
+                        st.write("merged columns after enforced route_name placement:", list(merged.columns))
+                except Exception:
+                    pass
                 # 前端严格移除名为 'driver' 的列，避免在展示或导出中出现
                 if "driver" in merged.columns:
                     merged = merged.drop(columns=["driver"])
                 # 前端严格移除指定的敏感/不展示字段（仅前端删除，不改后端）
                 _REMOVE_FRONTEND_FIELDS = {
                     "Order ID", "order_id", "orderId",
-                    "Beans Tracking", "beans_tracking", "beansTracking", "trackingId",
-                    "client_name", "clientName"
+                    "trackingId",
+                    "client_name", "clientName",
+                    "delivery_phone"
                 }
                 remove_cols = [c for c in merged.columns if c in _REMOVE_FRONTEND_FIELDS]
                 if remove_cols:
@@ -1539,20 +1956,126 @@ if df is not None:
             buffer = BytesIO()
             # Recompute the canonical final_df AFTER all last-minute mutations
             # so UI and export use the identical DataFrame and ordering.
+            # Provide debug info inside finalize_columns when debug_active is set.
             final_df = finalize_columns(merged)
-            ui_cols = list(final_df.columns)
-            # Render the final_df into the earlier placeholder so the first display
+
+            # Ensure `route_name` column exists in final_df (populate from merged if available)
+            try:
+                if "route_name" not in final_df.columns:
+                    if isinstance(merged, pd.DataFrame) and "route_name" in merged.columns:
+                        final_df["route_name"] = merged["route_name"].astype(object)
+                    else:
+                        final_df["route_name"] = ""
+            except Exception:
+                try:
+                    final_df["route_name"] = ""
+                except Exception:
+                    pass
+
+            # Reorder final_df to place route_name before driver when driver exists,
+            # otherwise place it immediately after a tracking-like column.
+            try:
+                cols_list = list(final_df.columns)
+                if "route_name" in cols_list:
+                    # remove existing to reinsert
+                    cols_list.remove("route_name")
+                    if "driver" in cols_list:
+                        if debug_active:
+                            st.write("Before placing route_name before driver (final_df):", cols_list)
+                        insert_idx = cols_list.index("driver")
+                        cols_list.insert(insert_idx, "route_name")
+                        if debug_active:
+                            st.write("After placing route_name before driver (final_df):", cols_list)
+                    else:
+                        # find tracking-like column
+                        tracking_like = None
+                        for cand in ("tracking_id", "tracking id", "trackingId", "Tracking ID"):
+                            if cand in cols_list:
+                                tracking_like = cand
+                                break
+                        if debug_active:
+                            st.write("Final_df tracking_like for route placement:", tracking_like)
+                        if tracking_like and tracking_like in cols_list:
+                            idx = cols_list.index(tracking_like)
+                            cols_list.insert(idx + 1, "route_name")
+                        else:
+                            cols_list.insert(1, "route_name")
+                    try:
+                        if debug_active:
+                            st.write("Final_df columns before reindex:", cols_list)
+                        final_df = final_df.reindex(columns=cols_list)
+                        if debug_active:
+                            st.write("Final_df columns after reindex:", list(final_df.columns))
+                    except Exception:
+                        # if reindex fails, keep final_df as-is
+                        pass
+            except Exception:
+                pass
+            # Ensure forbidden columns are removed from the DataFrame used for UI and export
+            try:
+                FORBIDDEN_FINAL_COLS = ["Order ID", "client_name", "delivery_phone"]
+                final_df = final_df.drop(columns=FORBIDDEN_FINAL_COLS, errors='ignore')
+            except Exception:
+                pass
+
+            # Ensure `Tracking ID` column contains the user's original input tracking values
+            try:
+                # prefer the original uploaded/pasted tracking column from the original_df
+                if 'tracking_col' in locals() and isinstance(merged, pd.DataFrame) and tracking_col in merged.columns:
+                    final_df['Tracking ID'] = merged[tracking_col]
+                else:
+                    # fallback: copy from common tracking-named columns if present
+                    found = False
+                    for cand in ("tracking_id", "trackingId", "tracking", "Tracking ID"):
+                        if cand in final_df.columns:
+                            final_df['Tracking ID'] = final_df[cand]
+                            found = True
+                            break
+                    if not found:
+                        final_df['Tracking ID'] = ""
+            except Exception:
+                try:
+                    final_df['Tracking ID'] = ""
+                except Exception:
+                    pass
+
+            # Standardize final DataFrame for display and export
+            try:
+                standardized_final = apply_final_column_order(final_df.copy())
+            except Exception:
+                standardized_final = apply_final_column_order(final_df)
+
+            if DEBUG_MODE:
+                try:
+                    st.write("FINAL columns:", list(standardized_final.columns))
+                except Exception:
+                    pass
+
+            ui_cols = list(standardized_final.columns)
+            # Render the standardized_final into the earlier placeholder so the first display
             # box matches the exported result and the second display is removed.
             try:
-                placeholder.dataframe(final_df.head(30), use_container_width=True)
+                placeholder.dataframe(standardized_final.head(30), use_container_width=True)
             except Exception:
                 try:
                     placeholder.write(final_df.head(30))
                 except Exception:
                     pass
 
-            # Use the same final_df for export (no separate export-only mutations)
-            export_df = final_df
+            # Use the same standardized_final for export (no separate export-only mutations)
+            export_df = standardized_final
+            # DEBUG: show display/export columns and non-empty route_name count
+            if DEBUG_MODE:
+                try:
+                    st.write("DISPLAY columns:", list(standardized_final.columns))
+                    st.write("EXPORT columns:", list(export_df.columns))
+                    try:
+                        cnt = int((standardized_final["route_name"].astype(str).str.strip() != "").sum())
+                    except Exception:
+                        cnt = 0
+                    st.write("route_name non-empty rows:", cnt)
+                except Exception:
+                    pass
             # Guardrail: verify UI and export columns match and show debug snippets if not
             if DEBUG_MODE:
                 try:
