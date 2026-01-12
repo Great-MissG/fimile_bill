@@ -1758,19 +1758,24 @@ if df is not None:
             try:
                 if zone_data is not None and not zone_data.empty:
                     zd = zone_data.copy()
-                    zd_pick = zd.iloc[:, 0].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
-                    zd_del = zd.iloc[:, 1].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
+                    # extract up to 5 digits and zero-pad to 5 to preserve leading zeros
+                    zd_pick = zd.iloc[:, 0].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                    zd_pick = zd_pick.fillna("").apply(lambda s: s.zfill(5) if s else "")
+                    zd_del = zd.iloc[:, 1].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                    zd_del = zd_del.fillna("").apply(lambda s: s.zfill(5) if s else "")
                     zd_zone = zd.iloc[:, 4].astype(str).str.strip().fillna("")
                     keys = (zd_pick + "|" + zd_del).tolist()
                     vals = zd_zone.tolist()
                     mapping = {k: v for k, v in zip(keys, vals) if k}
 
                     if "pickup_zipcode" in merged.columns:
-                        pseries = merged["pickup_zipcode"].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
+                        pseries = merged["pickup_zipcode"].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                        pseries = pseries.fillna("").apply(lambda s: s.zfill(5) if s else "")
                     else:
                         pseries = pd.Series([""] * len(merged))
                     if "delivery_zipcode" in merged.columns:
-                        dseries = merged["delivery_zipcode"].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
+                        dseries = merged["delivery_zipcode"].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                        dseries = dseries.fillna("").apply(lambda s: s.zfill(5) if s else "")
                     else:
                         dseries = pd.Series([""] * len(merged))
 
@@ -1856,8 +1861,11 @@ if df is not None:
                 if zone_data is not None and not zone_data.empty:
                     zd = zone_data.copy()
                     # 取 A/B/E 列（按题目说明 A=第1列, B=第2列, E=第5列）
-                    zd_pick = zd.iloc[:, 0].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
-                    zd_del = zd.iloc[:, 1].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
+                    # extract up to 5 digits and zero-pad to 5 to preserve leading zeros
+                    zd_pick = zd.iloc[:, 0].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                    zd_pick = zd_pick.fillna("").apply(lambda s: s.zfill(5) if s else "")
+                    zd_del = zd.iloc[:, 1].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                    zd_del = zd_del.fillna("").apply(lambda s: s.zfill(5) if s else "")
                     zd_zone = zd.iloc[:, 4].astype(str).str.strip().fillna("")
                     keys = (zd_pick + "|" + zd_del).tolist()
                     vals = zd_zone.tolist()
@@ -1865,11 +1873,13 @@ if df is not None:
 
                     # 构造 merged 的 zip5 pair key（保持字符串，保留前导 0）
                     if "pickup_zipcode" in merged.columns:
-                        pseries = merged["pickup_zipcode"].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
+                        pseries = merged["pickup_zipcode"].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                        pseries = pseries.fillna("").apply(lambda s: s.zfill(5) if s else "")
                     else:
                         pseries = pd.Series([""] * len(merged))
                     if "delivery_zipcode" in merged.columns:
-                        dseries = merged["delivery_zipcode"].astype(str).str.strip().str.extract(r"(\d{5})", expand=False).fillna("")
+                        dseries = merged["delivery_zipcode"].astype(str).str.strip().str.extract(r"(\d{1,5})", expand=False)
+                        dseries = dseries.fillna("").apply(lambda s: s.zfill(5) if s else "")
                     else:
                         dseries = pd.Series([""] * len(merged))
 
