@@ -1555,14 +1555,7 @@ if df is not None:
                         st.warning("route_name missing at stage: result_df (after df[cols+['_error']])")
                 except Exception:
                     pass
-            # Minimal debug: show signature detection raw fields and computed value for first 5 rows
-            try:
-                dbg_cols = [c for c in ('signature_required', 'room_of_choice', 'white_glove_service') if c in result_df.columns]
-                if dbg_cols:
-                    st.write("DEBUG service detection (first 5):")
-                    st.dataframe(result_df[dbg_cols].head(5), use_container_width=True)
-            except Exception:
-                pass
+            # (debug display for service detection removed)
 
             # 将 API 返回的结果与原始输入按规范化 Tracking 合并，使用 left join 保留原始行
             try:
