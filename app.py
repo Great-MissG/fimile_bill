@@ -1557,11 +1557,18 @@ if df is not None:
                     pass
             # (debug display for service detection removed)
 
-            # 将 API 返回的结果与原始输入按规范化 Tracking 合并，使用 left join 保留原始行
+                # 将 API 返回的结果与原始输入按规范化 Tracking 合并，使用 left join 保留原始行
             try:
                 # Use the preserved raw tracking normalization from the original df to merge,
                 # so we can avoid exposing the original tracking column in result_df/ui/export.
                 result_df["_tracking_norm"] = df["_tracking_norm_raw"].fillna("").astype(str)
+                # 防止 API 结果中同一 tracking 出现多行（可能来自重复输入或 API 返回多条记录）
+                # 导致与 original_df merge 时出现行重复，先按 _tracking_norm 去重，保留第一条
+                try:
+                    result_df = result_df.drop_duplicates(subset=["_tracking_norm"], keep="first").reset_index(drop=True)
+                except Exception:
+                    # 如果去重失败，则继续使用原始 result_df，避免中断流程
+                    pass
                 merged = original_df.merge(result_df, on="_tracking_norm", how="left", suffixes=("", "_api"))
 
                 if debug_active:
