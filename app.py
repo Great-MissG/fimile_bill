@@ -357,6 +357,39 @@ def _extract_times(logs):
         delivery_time_iso = to_iso_from_s(pod_sec) if pod_sec else to_iso_from_ms(safe_get(suc_log, "tsMillis"))
     return facility_check_in_iso, delivery_time_iso, suc_log
 
+
+def _extract_out_for_delivery_time(logs):
+    """Search logs for an 'out for delivery' event and return ISO time or None.
+
+    Heuristics (case-insensitive):
+    - event 'type' equals 'out_for_delivery' or contains 'out'
+    - 'description' / 'status' / 'message' / 'name' contains 'out for'
+    """
+    if not logs:
+        return None
+
+    def looks_like_out_for(x):
+        try:
+            t = (safe_get(x, "type") or "")
+            if isinstance(t, str) and "out" in t.lower() and "deliver" in t.lower():
+                return True
+            # check textual fields
+            for k in ("description", "status", "message", "name", "label"):
+                v = safe_get(x, k)
+                if isinstance(v, str) and "out for" in v.lower() and "deliver" in v.lower():
+                    return True
+        except Exception:
+            return False
+        return False
+
+    # search earliest occurrence (first) of such event
+    idx, entry = find_first(logs, looks_like_out_for)
+    if entry:
+        ms = event_ts_millis(entry)
+        if ms and ms > 0:
+            return to_iso_from_ms(ms)
+    return None
+
 def _extract_addresses_and_phone(logs, first_item, suc_log):
     pk_i, pk_log = find_first(logs, lambda x: safe_get(x, "item", "type") == "PICKUP")
     pickup_address = safe_get(pk_log, "item", "address") if pk_log else safe_get(first_item, "address")
@@ -758,6 +791,7 @@ def parse_beans_status_logs(resp_json):
     last_type = _get_last_status_type(logs)
 
     facility_check_in_iso, delivery_time_iso, suc_log = _extract_times(logs)
+    out_for_delivery_iso = _extract_out_for_delivery_time(logs)
 
     pickup_address, delivery_address, delivery_phone = _extract_addresses_and_phone(logs, first_item, suc_log)
 
@@ -834,6 +868,7 @@ def parse_beans_status_logs(resp_json):
         "Customer ID": shipper_name,
         "order_time": order_time_iso,
         "facility_check_in_time": facility_check_in_iso,
+        "out_for_delivery_time": out_for_delivery_iso,
         "delivery_time": delivery_time_iso,
         "weight_lbs": round(weight_lbs, 2) if weight_lbs is not None else None,
         #"Dim": dim_pd_raw,
@@ -1193,6 +1228,7 @@ def apply_final_column_order(df: pd.DataFrame) -> pd.DataFrame:
         "Customer ID",
         "order_time",
         "facility_check_in_time",
+        "out_for_delivery_time",
         "delivery_time",
         "weight_lbs",
         "length_in",
@@ -1456,7 +1492,7 @@ if df is not None:
                     if isinstance(resp, dict) and "_error" in resp:
                         out_rows.append({
                             "Order ID": tid, "Customer ID": None,
-                            "order_time": None, "facility_check_in_time": None, "delivery_time": None,
+                            "order_time": None, "facility_check_in_time": None, "out_for_delivery_time": None, "delivery_time": None,
                             "weight_lbs": None, "Dim": None,
                             "length_in": None, "width_in": None, "height_in": None,
                             "dim_weight": None, "billable weight": None,
@@ -1483,7 +1519,7 @@ if df is not None:
             # 输出列顺序（Total shipping fee → multi_attempt → status）
             cols = [
                 "Order ID", "Customer ID",
-                "order_time", "facility_check_in_time", "delivery_time",
+                "order_time", "facility_check_in_time", "out_for_delivery_time", "delivery_time",
                 "weight_lbs", "length_in", "width_in", "height_in",
                 "dim_weight", "billable weight",
                 "length+girth", "Base Rate", "Oversize Surcharge", "Address Correction",
@@ -2054,6 +2090,22 @@ if df is not None:
                 standardized_final = apply_final_column_order(final_df.copy())
             except Exception:
                 standardized_final = apply_final_column_order(final_df)
+
+            # Ensure the new column `out_for_delivery_time` is present in the standardized final
+            try:
+                if "out_for_delivery_time" not in standardized_final.columns:
+                    # prefer value from final_df if present, else merged, else create empty
+                    if isinstance(final_df, pd.DataFrame) and "out_for_delivery_time" in final_df.columns:
+                        standardized_final["out_for_delivery_time"] = final_df["out_for_delivery_time"]
+                    elif isinstance(merged, pd.DataFrame) and "out_for_delivery_time" in merged.columns:
+                        standardized_final["out_for_delivery_time"] = merged["out_for_delivery_time"]
+                    else:
+                        standardized_final["out_for_delivery_time"] = ""
+            except Exception:
+                try:
+                    standardized_final["out_for_delivery_time"] = ""
+                except Exception:
+                    pass
 
             if DEBUG_MODE:
                 try:
