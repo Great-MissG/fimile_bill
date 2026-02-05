@@ -1075,6 +1075,20 @@ def compute_base_rate(merged_df: pd.DataFrame, wyd_rate_df: pd.DataFrame) -> pd.
 
     bw_series = pd.to_numeric(merged_df[bw_col], errors='coerce')
 
+    # Find zone column in merged_df: prefer exact "zone", fallback to fuzzy contains "zone"
+    zone_col = None
+    if "zone" in merged_df.columns:
+        zone_col = "zone"
+    else:
+        for c in merged_df.columns:
+            if "zone" in str(c).lower():
+                zone_col = c
+                break
+
+    zone_raw_series = merged_df[zone_col] if zone_col is not None else pd.Series([None] * len(merged_df), index=merged_df.index)
+    zone_str_series = zone_raw_series.astype(str).str.strip()
+    zone_num_series = pd.to_numeric(zone_str_series.str.extract(r"(\d+)", expand=False), errors="coerce")
+
     # Detect min/max columns in rate df
     cols = list(wyd_rate_df.columns)
     min_idx = None
@@ -1118,30 +1132,42 @@ def compute_base_rate(merged_df: pd.DataFrame, wyd_rate_df: pd.DataFrame) -> pd.
 
     valid_mins = mins.to_numpy()[valid_pos]
     valid_maxs = maxs.to_numpy()[valid_pos]
-    # Build price array (first numeric column after max_idx, else any numeric column)
-    price_col = None
-    for ci in range(max_idx + 1, len(cols)):
-        col_vals = pd.to_numeric(wyd_rate_df.iloc[:, ci], errors='coerce')
-        if not col_vals.dropna().empty:
-            price_col = ci
-            break
-    if price_col is None:
-        for ci in range(len(cols)-1, -1, -1):
-            col_vals = pd.to_numeric(wyd_rate_df.iloc[:, ci], errors='coerce')
-            if not col_vals.dropna().empty:
-                price_col = ci
-                break
+    # Detect available zone price columns in rate_df, e.g. zone_2 / Zone 3 / zone-4
+    zone_price_cols = {}
+    zone_col_names = []
+    for ci, c in enumerate(cols):
+        cname = str(c).strip()
+        m = re.match(r"(?i)^zone[\s_\-]*([0-9]+)$", cname)
+        if not m:
+            continue
+        try:
+            znum = int(m.group(1))
+        except Exception:
+            continue
+        zone_price_cols[znum] = ci
+        zone_col_names.append(cname)
 
-    if price_col is None:
+    if not zone_price_cols:
         raise ValueError(
-            "Cannot find price column in WYD rate DataFrame.\n"
+            "Cannot find any zone price columns in WYD rate DataFrame (expected zone_2, zone_3, ...).\n"
             f"wyd_rate_df.columns={list(wyd_rate_df.columns)}"
         )
 
-    price_arr = pd.to_numeric(wyd_rate_df.iloc[:, price_col], errors='coerce').to_numpy()
-
     # Map billable weights to ranges safely without using IntervalIndex.get_indexer
     base_rate_arr = np.full(len(bw_series), np.nan, dtype=float)
+    reason_arr = np.array([""] * len(bw_series), dtype=object)
+    has_range_match = np.zeros(len(bw_series), dtype=bool)
+    zone_col_miss = set()
+    no_weight_mask = bw_series.isna().to_numpy()
+    if np.any(no_weight_mask):
+        reason_arr[no_weight_mask] = "no_weight"
+    zone_num_np = zone_num_series.to_numpy()
+    zone_missing_mask = pd.isna(zone_num_series).to_numpy()
+    if zone_col is None:
+        reason_arr[(~no_weight_mask) & np.isnan(base_rate_arr)] = "no_zone_col"
+    else:
+        reason_arr[(~no_weight_mask) & zone_missing_mask & np.isnan(base_rate_arr)] = "no_zone"
+
     # iterate valid rows in order and assign rates where bw falls into [min, max]
     for i_rel, pos in enumerate(valid_pos):
         mn = valid_mins[i_rel]
@@ -1155,21 +1181,108 @@ def compute_base_rate(merged_df: pd.DataFrame, wyd_rate_df: pd.DataFrame) -> pd.
             # if comparison fails, skip this band
             continue
         mask = mask_series.fillna(False).to_numpy()
+        has_range_match = has_range_match | mask
         # only set where not already assigned (preserve earlier assignments)
         to_assign = mask & np.isnan(base_rate_arr)
         if not np.any(to_assign):
             continue
-        # price at the original DataFrame row index
-        if pos < len(price_arr):
-            val = price_arr[pos]
-        else:
-            val = np.nan
-        # only assign numeric prices
-        if pd.isna(val):
+        if zone_col is None:
             continue
-        base_rate_arr[to_assign] = float(val)
+
+        # assign by zone per row in this matched range row
+        candidate_zone_vals = pd.unique(zone_num_np[to_assign])
+        for zval in candidate_zone_vals:
+            if pd.isna(zval):
+                continue
+            try:
+                zone_num = int(zval)
+            except Exception:
+                continue
+            row_zone_mask = to_assign & (zone_num_np == zone_num)
+            if not np.any(row_zone_mask):
+                continue
+            price_ci = zone_price_cols.get(zone_num)
+            if price_ci is None:
+                zone_col_miss.add(zone_num)
+                reason_arr[row_zone_mask & (reason_arr == "")] = "no_zone_price_col"
+                continue
+            try:
+                val = pd.to_numeric(wyd_rate_df.iloc[pos, price_ci], errors='coerce')
+            except Exception:
+                val = np.nan
+            if pd.isna(val):
+                reason_arr[row_zone_mask & (reason_arr == "")] = "price_nan"
+                continue
+            base_rate_arr[row_zone_mask] = float(val)
 
     result = pd.Series(base_rate_arr, index=merged_df.index)
+
+    # Fill fallback reasons for still-unassigned rows
+    unresolved = np.isnan(base_rate_arr)
+    if np.any(unresolved):
+        idx_unresolved = np.where(unresolved)[0]
+        for idx in idx_unresolved:
+            if reason_arr[idx]:
+                continue
+            if no_weight_mask[idx]:
+                reason_arr[idx] = "no_weight"
+            elif zone_col is None:
+                reason_arr[idx] = "no_zone_col"
+            elif pd.isna(zone_num_np[idx]):
+                reason_arr[idx] = "no_zone"
+            elif not has_range_match[idx]:
+                reason_arr[idx] = "no_range_match"
+            else:
+                reason_arr[idx] = "no_zone_price_col"
+
+    # Required debug output before low-coverage error in build_final_df
+    notna_ratio = float(result.notna().mean()) if len(result) > 0 else 0.0
+    if notna_ratio < 0.80:
+        try:
+            min_col_name = cols[min_idx] if min_idx is not None and min_idx < len(cols) else None
+            max_col_name = cols[max_idx] if max_idx is not None and max_idx < len(cols) else None
+            if zone_col is None:
+                zone_empty_ratio = 1.0
+                zone_nondigit_ratio = 1.0
+            else:
+                zone_nonempty = zone_str_series.ne("") & zone_str_series.str.lower().ne("nan")
+                zone_empty_ratio = float((~zone_nonempty).mean())
+                zone_nondigit_ratio = float((zone_nonempty & zone_num_series.isna()).mean())
+
+            track_col = None
+            for cand in ("tracking_id", "Tracking ID", "trackingId", "tracking"):
+                if cand in merged_df.columns:
+                    track_col = cand
+                    break
+
+            st.write(
+                "DEBUG base_rate mapping ->",
+                {
+                    "min_col": min_col_name,
+                    "max_col": max_col_name,
+                    "zone_col": zone_col,
+                    "available_zone_cols": sorted(zone_col_names),
+                    "zone_col_miss": sorted(list(zone_col_miss)),
+                    "zone_empty_ratio": zone_empty_ratio,
+                    "zone_nondigit_ratio": zone_nondigit_ratio,
+                    "base_rate_notna_ratio": notna_ratio,
+                },
+            )
+
+            bad_idx = np.where(unresolved)[0][:10]
+            sample_rows = []
+            for bi in bad_idx:
+                row_info = {
+                    "weight": None if pd.isna(bw_series.iloc[bi]) else float(bw_series.iloc[bi]),
+                    "zone": None if zone_col is None else zone_raw_series.iloc[bi],
+                    "reason": reason_arr[bi] if reason_arr[bi] else "unknown",
+                }
+                if track_col is not None:
+                    row_info["tracking_id"] = merged_df.iloc[bi][track_col]
+                sample_rows.append(row_info)
+            st.write("DEBUG base_rate unmapped_samples(top10):", sample_rows)
+        except Exception:
+            pass
 
     if result.isna().all():
         raise ValueError(
