@@ -398,16 +398,7 @@ def _extract_addresses_and_phone(logs, first_item, suc_log):
                 delivery_address = addr
                 break
 
-    # delivery_phone extraction intentionally disabled to avoid exposing phone numbers
-    # The original logic (kept here as comment) would iterate logs and take customerPhone from DROPOFF item:
-    # delivery_phone = None
-    # for lgx in logs:
-    #     item = safe_get(lgx, "item") or {}
-    #     if (safe_get(item, "type") or "").upper() == "DROPOFF":
-    #         delivery_phone = safe_get(item, "customerPhone")
-    #         break
-    delivery_phone = None
-    return pickup_address, delivery_address, delivery_phone
+    return pickup_address, delivery_address
 
 def _extract_driver_info(logs):
     driver = None
@@ -692,7 +683,6 @@ def parse_beans_status_logs(resp_json):
     - 司机名
     - 状态：status（最后一条日志的 type 原样）
     - 地址：pickup_address / delivery_address
-    - 收件人电话: delivery_phone
     """
     if not resp_json or not isinstance(resp_json, dict) or "listItemReadableStatusLogs" not in resp_json:
         return {"_error": "Invalid or empty API response for status logs."}
@@ -774,7 +764,7 @@ def parse_beans_status_logs(resp_json):
 
     facility_check_in_iso, out_for_delivery_iso, delivery_time_iso, suc_log = _extract_times(logs)
 
-    pickup_address, delivery_address, delivery_phone = _extract_addresses_and_phone(logs, first_item, suc_log)
+    pickup_address, delivery_address = _extract_addresses_and_phone(logs, first_item, suc_log)
 
     driver = _extract_driver_info(logs)
     # Determine if this record/stop is a DROPOFF (compatible with multiple possible paths)
@@ -873,7 +863,6 @@ def parse_beans_status_logs(resp_json):
         "service_type": service_type,
         "pickup_address": pickup_address,
         "delivery_address": delivery_address,
-        "delivery_phone": delivery_phone,
         "signature_required": sig_required,
         "room_of_choice": room_of_choice_val,
         "white_glove_service": white_glove_service_val,
@@ -1256,11 +1245,11 @@ def compute_base_rate(merged_df: pd.DataFrame, wyd_rate_df: pd.DataFrame) -> pd.
 
 
 def apply_final_column_order(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a DataFrame with the exact final columns order (31 cols).
+    """Return a DataFrame with the exact final columns order (30 cols).
 
     - Adds missing columns filled with empty string "".
     - Preserves existing data when column names match.
-    - Keeps only the 31 columns specified (drops others for display/export).
+    - Keeps only the 30 columns specified (drops others for display/export).
     """
     required = [
         "Tracking ID",
@@ -1291,7 +1280,6 @@ def apply_final_column_order(df: pd.DataFrame) -> pd.DataFrame:
         "pickup_address_zipcode",
         "delivery_address",
         "delivery_address_zipcode",
-        "delivery_phone",
         "zone",
         "_error",
     ]
@@ -1575,7 +1563,7 @@ if df is not None:
                 "Total shipping fee", "multi_attempt", "successful_dropoffs", "status", "route_name", "driver_for_successful_order",
                 # service columns derived from dimensions.dims.V
                 "signature_required", "room_of_choice", "white_glove_service",
-                "service_type", "pickup_address", "delivery_address", "delivery_phone"
+                "service_type", "pickup_address", "delivery_address"
             ]
 
             # 把 out_rows 变成 DataFrame
@@ -1765,7 +1753,6 @@ if df is not None:
                     "Order ID", "order_id", "orderId",
                     "trackingId",
                     "client_name", "clientName",
-                    "delivery_phone"
                 }
                 remove_cols = [c for c in merged.columns if c in _REMOVE_FRONTEND_FIELDS]
                 if remove_cols:
@@ -2171,7 +2158,7 @@ if df is not None:
                 pass
             # Ensure forbidden columns are removed from the DataFrame used for UI and export
             try:
-                FORBIDDEN_FINAL_COLS = ["Order ID", "client_name", "delivery_phone"]
+                FORBIDDEN_FINAL_COLS = ["Order ID", "client_name"]
                 final_df = final_df.drop(columns=FORBIDDEN_FINAL_COLS, errors='ignore')
             except Exception:
                 pass
