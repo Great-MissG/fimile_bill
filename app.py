@@ -351,12 +351,26 @@ def _get_last_status_type(logs):
 def _extract_times(logs):
     wh_i, wh_log = find_first(logs, lambda x: safe_get(x, "type") == "warehouse")
     facility_check_in_iso = to_iso_from_ms(safe_get(wh_log, "tsMillis"))
+    # Fallback: when warehouse check-in time is missing, use first `sort` event
+    # whose description indicates "Sorted for delivery onto route".
+    if not facility_check_in_iso:
+        _, sort_log = find_first(
+            logs,
+            lambda x: (
+                safe_get(x, "type") == "sort"
+                and isinstance((safe_get(x, "description") or safe_get(x, "desc")), str)
+                and "sorted for delivery onto route" in (safe_get(x, "description") or safe_get(x, "desc")).lower()
+            ),
+        )
+        facility_check_in_iso = to_iso_from_ms(safe_get(sort_log, "tsMillis"))
+    ofd_i, ofd_log = find_first(logs, lambda x: safe_get(x, "type") == "out-for-delivery")
+    out_for_delivery_iso = to_iso_from_ms(safe_get(ofd_log, "tsMillis"))
     suc_i, suc_log = find_last(logs, lambda x: safe_get(x, "type") == "success")
     delivery_time_iso = None
     if suc_log:
         pod_sec = safe_get(suc_log, "pod", "podTimestampEpoch")
         delivery_time_iso = to_iso_from_s(pod_sec) if pod_sec else to_iso_from_ms(safe_get(suc_log, "tsMillis"))
-    return facility_check_in_iso, delivery_time_iso, suc_log
+    return facility_check_in_iso, out_for_delivery_iso, delivery_time_iso, suc_log
 
 def _extract_addresses_and_phone(logs, first_item, suc_log):
     pk_i, pk_log = find_first(logs, lambda x: safe_get(x, "item", "type") == "PICKUP")
@@ -671,7 +685,7 @@ def parse_beans_status_logs(resp_json):
     """
     抽取目标字段（含你的全部需求）：
     - 基本：Order ID / Customer ID(client_name=shipperName) / service_type
-    - 时间：order_time / facility_check_in_time / delivery_time
+    - 时间：order_time / facility_check_in_time / out_for_delivery_time / delivery_time
     - 维度：Dim 原串、length_in/width_in/height_in、dim_weight、billable weight、length+girth
     - 费用：Base Rate / Oversize Surcharge / Signature required / Address Correction / Total shipping fee
     - 次数：multi_attempt（DROPOFF 的 success+fail）
@@ -758,7 +772,7 @@ def parse_beans_status_logs(resp_json):
 
     last_type = _get_last_status_type(logs)
 
-    facility_check_in_iso, delivery_time_iso, suc_log = _extract_times(logs)
+    facility_check_in_iso, out_for_delivery_iso, delivery_time_iso, suc_log = _extract_times(logs)
 
     pickup_address, delivery_address, delivery_phone = _extract_addresses_and_phone(logs, first_item, suc_log)
 
@@ -835,6 +849,7 @@ def parse_beans_status_logs(resp_json):
         "Customer ID": shipper_name,
         "order_time": order_time_iso,
         "facility_check_in_time": facility_check_in_iso,
+        "out_for_delivery_time": out_for_delivery_iso,
         "delivery_time": delivery_time_iso,
         "weight_lbs": round(weight_lbs, 2) if weight_lbs is not None else None,
         #"Dim": dim_pd_raw,
@@ -1241,17 +1256,18 @@ def compute_base_rate(merged_df: pd.DataFrame, wyd_rate_df: pd.DataFrame) -> pd.
 
 
 def apply_final_column_order(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a DataFrame with the exact final columns order (30 cols).
+    """Return a DataFrame with the exact final columns order (31 cols).
 
     - Adds missing columns filled with empty string "".
     - Preserves existing data when column names match.
-    - Keeps only the 30 columns specified (drops others for display/export).
+    - Keeps only the 31 columns specified (drops others for display/export).
     """
     required = [
         "Tracking ID",
         "Customer ID",
         "order_time",
         "facility_check_in_time",
+        "out_for_delivery_time",
         "delivery_time",
         "weight_lbs",
         "length_in",
@@ -1525,7 +1541,7 @@ if df is not None:
                     if isinstance(resp, dict) and "_error" in resp:
                         out_rows.append({
                             "Order ID": tid, "Customer ID": None,
-                            "order_time": None, "facility_check_in_time": None, "delivery_time": None,
+                            "order_time": None, "facility_check_in_time": None, "out_for_delivery_time": None, "delivery_time": None,
                             "weight_lbs": None, "Dim": None,
                             "length_in": None, "width_in": None, "height_in": None,
                             "dim_weight": None, "billable weight": None,
@@ -1552,7 +1568,7 @@ if df is not None:
             # 输出列顺序（Total shipping fee → multi_attempt → status）
             cols = [
                 "Order ID", "Customer ID",
-                "order_time", "facility_check_in_time", "delivery_time",
+                "order_time", "facility_check_in_time", "out_for_delivery_time", "delivery_time",
                 "weight_lbs", "length_in", "width_in", "height_in",
                 "dim_weight", "billable weight",
                 "length+girth", "Base Rate", "Oversize Surcharge", "Address Correction",
