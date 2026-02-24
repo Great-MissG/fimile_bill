@@ -580,7 +580,7 @@ def extract_dims(item):
     for d in dims:
         t = safe_get(d, "t")
         v = safe_get(d, "v")
-        if t == "WEIGHT":
+        if isinstance(t, str) and t.strip().upper() == "WEIGHT":
             weight = v
         if isinstance(v, str) and v.lower().startswith("pd:"):
             pd_dim = v
@@ -627,6 +627,12 @@ def _parse_state_zip_from_address(addr: str):
 def to_float_or_none(x):
     try:
         if x is None or x == "":
+            return None
+        if isinstance(x, str):
+            s = x.strip()
+            m = re.search(r"-?\d+(?:\.\d+)?", s)
+            if m:
+                return float(m.group(0))
             return None
         return float(x)
     except Exception:
@@ -689,8 +695,21 @@ def parse_beans_status_logs(resp_json):
 
     logs = resp_json.get("listItemReadableStatusLogs", []) or []
     tracking_id, shipper_name, service_type, order_time_iso, first_item = _extract_first_item_details(logs)
+    # Weight/dim data is often attached to DROPOFF item instead of logs[0].item.
+    dims_item = first_item
+    dims_source = "first_item"
+    try:
+        _dr_i0, _dr_log0 = find_last(logs, lambda x: safe_get(x, "item", "type") == "DROPOFF")
+        _dropoff_item0 = safe_get(_dr_log0, "item") or {}
+        if _dropoff_item0:
+            dims_item = _dropoff_item0
+            dims_source = "dropoff_item"
+    except Exception:
+        dims_item = first_item
+        dims_source = "first_item"
 
-    weight_lbs, dim_pd_raw, length_in, width_in, height_in, dim_weight, billable_weight, lg = _calculate_weights_and_dims(first_item)
+    weight_lbs_raw, _dim_pd_raw_dbg = extract_dims(dims_item)
+    weight_lbs, dim_pd_raw, length_in, width_in, height_in, dim_weight, billable_weight, lg = _calculate_weights_and_dims(dims_item)
 
     # For services, read only from DROPOFF item. Use signatureRequired on DROPOFF as primary.
     sig_detect_raw = {}
@@ -1651,7 +1670,7 @@ if df is not None:
                         "Order ID", "Customer ID",
                         "order_time", "facility_check_in_time", "out_for_delivery_time", "delivery_time",
                         "weight_lbs", "length_in", "width_in", "height_in",
-                        "dim_weight", "billable weight", "length+girth",
+                        "dim_weight", "length+girth",
                         "Base Rate", "Oversize Surcharge", "Address Correction", "Total shipping fee",
                         "multi_attempt", "successful_dropoffs", "status", "route_name",
                         "driver_for_successful_order", "signature_required", "room_of_choice",
@@ -1666,6 +1685,20 @@ if df is not None:
                         else:
                             merged[c] = merged[api_c]
                         merged = merged.drop(columns=[api_c])
+                except Exception:
+                    pass
+
+                # billable weight is a derived field: max(weight_lbs, dim_weight)
+                # Do not rely on input/API text columns for this value.
+                try:
+                    w_series = pd.to_numeric(merged.get("weight_lbs"), errors="coerce")
+                    d_series = pd.to_numeric(merged.get("dim_weight"), errors="coerce")
+                    merged["billable weight"] = np.where(
+                        w_series.isna() & d_series.isna(),
+                        np.nan,
+                        np.fmax(w_series.fillna(-np.inf), d_series.fillna(-np.inf)),
+                    )
+                    merged.loc[np.isneginf(merged["billable weight"]), "billable weight"] = np.nan
                 except Exception:
                     pass
 
@@ -2214,6 +2247,20 @@ if df is not None:
                 standardized_final = apply_final_column_order(final_df.copy())
             except Exception:
                 standardized_final = apply_final_column_order(final_df)
+
+            # Guardrail: enforce derived billable weight in the final export DataFrame.
+            # This prevents template/reorder steps from leaving it blank.
+            try:
+                w_final = pd.to_numeric(standardized_final.get("weight_lbs"), errors="coerce")
+                d_final = pd.to_numeric(standardized_final.get("dim_weight"), errors="coerce")
+                standardized_final["billable weight"] = np.where(
+                    w_final.isna() & d_final.isna(),
+                    np.nan,
+                    np.fmax(w_final.fillna(-np.inf), d_final.fillna(-np.inf)),
+                )
+                standardized_final.loc[np.isneginf(standardized_final["billable weight"]), "billable weight"] = np.nan
+            except Exception:
+                pass
 
             if DEBUG_MODE:
                 try:
