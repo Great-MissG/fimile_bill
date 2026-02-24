@@ -1644,6 +1644,31 @@ if df is not None:
                     pass
                 merged = original_df.merge(result_df, on="_tracking_norm", how="left", suffixes=("", "_api"))
 
+                # If input file already has same-named columns, pandas keeps input as-is and
+                # appends `_api` to API values. For export, prefer API-computed values.
+                try:
+                    prefer_api_cols = [
+                        "Order ID", "Customer ID",
+                        "order_time", "facility_check_in_time", "out_for_delivery_time", "delivery_time",
+                        "weight_lbs", "length_in", "width_in", "height_in",
+                        "dim_weight", "billable weight", "length+girth",
+                        "Base Rate", "Oversize Surcharge", "Address Correction", "Total shipping fee",
+                        "multi_attempt", "successful_dropoffs", "status", "route_name",
+                        "driver_for_successful_order", "signature_required", "room_of_choice",
+                        "white_glove_service", "service_type", "pickup_address", "delivery_address", "_error",
+                    ]
+                    for c in prefer_api_cols:
+                        api_c = f"{c}_api"
+                        if api_c not in merged.columns:
+                            continue
+                        if c in merged.columns:
+                            merged[c] = merged[api_c].combine_first(merged[c])
+                        else:
+                            merged[c] = merged[api_c]
+                        merged = merged.drop(columns=[api_c])
+                except Exception:
+                    pass
+
                 if debug_active:
                     try:
                         st.write("STAGE: merged (after left join)")
