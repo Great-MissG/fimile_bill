@@ -87,6 +87,7 @@ st.subheader("选择价卡 (Rate Card)")
 RATE_CARDS = {
     "standard": {"display": "Standard Rate", "file_base": "standard_rate"},
     "wyd": {"display": "WYD Rate", "file_base": "wyd_rate"},
+    "DSP": {"display": "DSP Rate", "file_base": "dsp_rate"},
 }
 
 
